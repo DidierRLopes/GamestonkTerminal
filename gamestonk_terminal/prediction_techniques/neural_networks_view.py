@@ -1,4 +1,8 @@
+""" Neural Networks View"""
+__docformat__ = "numpy"
+
 import argparse
+from typing import List, Any, Union
 import datetime
 import os
 import traceback
@@ -8,7 +12,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from pandas.plotting import register_matplotlib_converters
 from TimeSeriesCrossValidation import splitTrain
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, Normalizer
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, SimpleRNN, Dense, Dropout
 
@@ -25,6 +29,7 @@ from gamestonk_terminal.prediction_techniques.pred_helper import (
     print_pretty_prediction_nn,
     price_prediction_backtesting_color,
     print_prediction_kpis,
+    prepare_scale_train_valid_test,
 )
 
 from gamestonk_terminal import feature_flags as gtff
@@ -44,7 +49,9 @@ ORIGINAL_TF_XLA_FLAGS = os.environ.get("TF_XLA_FLAGS")
 ORIGINAL_TF_FORCE_GPU_ALLOW_GROWTH = os.environ.get("TF_FORCE_GPU_ALLOW_GROWTH")
 
 
-def build_neural_network_model(Recurrent_Neural_Network, n_inputs, n_days):
+def build_neural_network_model(
+    Recurrent_Neural_Network: List[Any], n_inputs: int, n_days: int
+):
     model = Sequential()
 
     for idx_layer, d_layer in enumerate(Recurrent_Neural_Network):
@@ -91,9 +98,23 @@ def build_neural_network_model(Recurrent_Neural_Network, n_inputs, n_days):
     return model
 
 
-def _parse_args(prog, description, l_args):
-    """Create an argparser and parse l_args. Will print help if user requests it.
-    :return: ns_parser"""
+def _parse_args(prog: str, description: str, other_args: List[str]):
+    """
+    Create an argparser and parse other_args. Will print help if user requests it.
+    Parameters
+    ----------
+    prog: str
+        Program for argparser
+    description: str
+        Description for argparser
+    other_args
+        Argparse arguments to pass
+    Returns
+    -------
+    ns_parser: argparse.Namespace
+        Parsed argument parser
+    """
+
     parser = argparse.ArgumentParser(
         prog=prog,
         description=description,
@@ -123,7 +144,7 @@ def _parse_args(prog, description, l_args):
         action="store",
         dest="n_epochs",
         type=check_positive,
-        default=200,
+        default=50,
         help="number of training epochs.",
     )
     parser.add_argument(
@@ -140,8 +161,8 @@ def _parse_args(prog, description, l_args):
         "--pp",
         action="store",
         dest="s_preprocessing",
-        default="normalization",
-        choices=["normalization", "standardization", "none"],
+        default="minmax",
+        choices=["normalization", "standardization", "minmax", "none"],
         help="pre-processing data.",
     )
     parser.add_argument(
@@ -231,9 +252,17 @@ def _parse_args(prog, description, l_args):
         default=1,
         help="number of loops to iterate and train models",
     )
+    parser.add_argument(
+        "-v",
+        "--valid",
+        type=float,
+        dest="valid_split",
+        default=0.1,
+        help="Validation data split fraction",
+    )
 
     try:
-        ns_parser = parse_known_args_and_warn(parser, l_args)
+        ns_parser = parse_known_args_and_warn(parser, other_args)
         if not ns_parser:
             return None
 
@@ -276,10 +305,27 @@ def _restore_env():
     restore("TF_FORCE_GPU_ALLOW_GROWTH", ORIGINAL_TF_FORCE_GPU_ALLOW_GROWTH)
 
 
-def _setup_backtesting(df_stock, ns_parser):
-    """Set up backtesting if enabled
-    :return: (df_stock, df_future), where df_future is None if s_end_date is not set.
-    :raises Exception: if configuration is invalid"""
+def _setup_backtesting(df_stock: pd.DataFrame, ns_parser: argparse.Namespace):
+    """
+    Setup backtesting when end data is specified
+    Parameters
+    ----------
+    df_stock: pd.DataFrame
+        Stock data
+    ns_parser: argparse.Namespace
+        Parsed arguments
+    Returns
+    -------
+    df_stock: pd.DataFrame
+        Data before end date
+    df_future: pd.DataFrame
+        Data after end date
+    Raises
+    -------
+    Exception
+        If configuration is invalid
+    """
+
     df_future = None
     if ns_parser.s_end_date:
         if ns_parser.s_end_date < df_stock.index[0]:
@@ -309,18 +355,45 @@ def _setup_backtesting(df_stock, ns_parser):
     return df_stock, df_future
 
 
-def _preprocess_split(df_stock, ns_parser):
-    """Preprocess and split training data.
-    :return: (scaler, stock_train_data, stock_x, stock_y)
-    :raises Exception: if more training data is needed."""
+def _preprocess_split(df_stock: pd.DataFrame, ns_parser: argparse.Namespace):
+    """
+    Preprocess and split dstock data
+    Parameters
+    ----------
+    df_stock: pd.DataFrame
+        Dataframe of stock prices
+    ns_parser: argparse.Namespace
+        Parsed argparse arguments
+
+    Returns
+    -------
+    scaler: Union[MinMaxScaler, StandardScaler, Normalizer]
+        sklearn scaler used
+    stock_train_data: np.ndarray
+        All training data
+    stock_x: np.ndarray
+        Inputs for model
+    stock_y: np.ndarray
+        Outputs for model
+    Raises
+    -------
+    Exception
+        Not enough training data is provided
+    """
+
     # Pre-process data
     if ns_parser.s_preprocessing == "standardization":
         scaler = StandardScaler()
         stock_train_data = scaler.fit_transform(
             np.array(df_stock["5. adjusted close"].values.reshape(-1, 1))
         )
-    elif ns_parser.s_preprocessing == "normalization":
+    elif ns_parser.s_preprocessing == "minmax":
         scaler = MinMaxScaler()
+        stock_train_data = scaler.fit_transform(
+            np.array(df_stock["5. adjusted close"].values.reshape(-1, 1))
+        )
+    elif ns_parser.s_preprocessing == "normalization":
+        scaler = Normalizer()
         stock_train_data = scaler.fit_transform(
             np.array(df_stock["5. adjusted close"].values.reshape(-1, 1))
         )
@@ -336,15 +409,44 @@ def _preprocess_split(df_stock, ns_parser):
     )
     if not stock_x:
         raise Exception("Given the model parameters more training data is needed.")
+
     stock_x = np.array(stock_x)
     stock_y = np.array(stock_y)
+
     return scaler, stock_train_data, stock_x, stock_y
 
 
-def _rescale_data(df_stock, ns_parser, scaler, yhat, idx_loop):
-    """Re-scale the data back and return the prediction dataframe."""
-    if (ns_parser.s_preprocessing == "standardization") or (
-        ns_parser.s_preprocessing == "normalization"
+def _rescale_data(
+    df_stock: pd.DataFrame,
+    ns_parser: argparse.Namespace,
+    scaler: Union[MinMaxScaler, StandardScaler, Normalizer],
+    yhat: np.ndarray,
+    idx_loop: int,
+):
+    """
+    Re-scale the data back and return the prediction dataframe.
+    Parameters
+    ----------
+    df_stock: pd.DataFrame
+        Dataframe of stock prices
+    ns_parser: argparse.Namespace
+        Parsed argument parser
+    scaler:
+        One of the predefined sklearn scalers
+    yhat: np.ndarry
+        Predicted values
+    idx_loop: int
+        Loop index
+
+    Returns
+    -------
+    df_pred: pd.Series
+        Series of resclaled predictions
+    """
+    if (
+        (ns_parser.s_preprocessing == "standardization")
+        or (ns_parser.s_preprocessing == "normalization")
+        or (ns_parser.s_preprocessing == "minmax")
     ):
         y_pred_test_t = scaler.inverse_transform(yhat.tolist())
     else:
@@ -360,9 +462,35 @@ def _rescale_data(df_stock, ns_parser, scaler, yhat, idx_loop):
 
 
 def _plot_and_print_results(
-    df_stock, ns_parser, df_future, df_pred, model_name, s_ticker
+    df_stock: pd.DataFrame,
+    ns_parser: argparse.Namespace,
+    df_future: pd.DataFrame,
+    df_pred: pd.DataFrame,
+    model_name: str,
+    s_ticker: str,
 ):
-    """Plot and print the results."""
+    """
+    Plot and print results
+    Parameters
+    ----------
+    df_stock: pd.DataFrame:
+        Dataframe of stock prices
+    ns_parser: argparse.Namespace
+        Parsed argument parser
+    df_future: pd.DataFrame
+        Dataframe of future prices
+    df_pred: pd.DataFrame
+        Dataframe of predicted prices
+    model_name: str
+        Model Name
+    s_ticker: str
+        Ticker
+
+    Returns
+    -------
+
+    """
+
     # Plotting
     plt.figure(figsize=plot_autoscale(), dpi=PLOT_DPI)
     plt.plot(df_stock.index, df_stock["5. adjusted close"], lw=3)
@@ -699,10 +827,25 @@ def _plot_and_print_results(
             print("")
 
 
-def mlp(l_args, s_ticker, df_stock):
+def mlp(other_args: List[str], s_ticker: str, df_stock: pd.DataFrame):
+    """
+    Train a multi-layer perceptron model
+    Parameters
+    ----------
+    other_args: List[str]
+        Argparse Arguments
+    s_ticker: str
+        Ticker
+    df_stock: pd.DataFrame
+        Loaded stock dataframe
+
+    Returns
+    -------
+
+    """
     try:
         ns_parser = _parse_args(
-            prog="mlp", description="""Multilayer Perceptron. """, l_args=l_args
+            prog="mlp", description="""Multilayer Perceptron. """, other_args=other_args
         )
         if not ns_parser:
             return
@@ -768,10 +911,27 @@ def mlp(l_args, s_ticker, df_stock):
         _restore_env()
 
 
-def rnn(l_args, s_ticker, df_stock):
+def rnn(other_args: List[str], s_ticker: str, df_stock: pd.DataFrame):
+    """
+    Train a Recurrent Neural Network (rnn)
+    Parameters
+    ----------
+    other_args:List[str]
+        Argparse arguments
+    s_ticker: str
+        Stock ticker
+    df_stock: pd.DataFrame
+        Dataframe of stock prices
+
+    Returns
+    -------
+
+    """
     try:
         ns_parser = _parse_args(
-            prog="rnn", description="""Recurrent Neural Network. """, l_args=l_args
+            prog="rnn",
+            description="""Recurrent Neural Network. """,
+            other_args=other_args,
         )
         if not ns_parser:
             return
@@ -839,67 +999,111 @@ def rnn(l_args, s_ticker, df_stock):
         _restore_env()
 
 
-def lstm(l_args, s_ticker, df_stock):
+def lstm(other_args: List[str], s_ticker: str, df_stock: pd.DataFrame):
+    """
+    Train a Long-Short-Term-Memory Neural Net (lstm)
+    Parameters
+    ----------
+    other_args:List[str]
+        Argparse arguments
+    s_ticker: str
+        Stock ticker
+    df_stock: pd.DataFrame
+        Dataframe of stock prices
+
+    Returns
+    -------
+
+    """
     try:
         ns_parser = _parse_args(
-            prog="lstm", description="""Long-Short Term Memory. """, l_args=l_args
+            prog="lstm",
+            description="""Long-Short Term Memory. """,
+            other_args=other_args,
         )
         if not ns_parser:
             return
-
         # Setup backtesting
-        df_stock, df_future = _setup_backtesting(df_stock, ns_parser)
+        # df_stock, df_future = _setup_backtesting(df_stock, ns_parser)
 
         # Pre-process data
-        scaler, stock_train_data, stock_x, stock_y = _preprocess_split(
-            df_stock, ns_parser
-        )
-        stock_x = np.reshape(stock_x, (stock_x.shape[0], stock_x.shape[1], 1))
-        stock_y = np.reshape(stock_y, (stock_y.shape[0], stock_y.shape[1], 1))
+        # scaler, stock_train_data, stock_x, stock_y = _preprocess_split(
+        #    df_stock, ns_parser
+        # )
+        # stock_x = np.reshape(stock_x, (stock_x.shape[0], stock_x.shape[1], 1))
+        # stock_y = np.reshape(stock_y, (stock_y.shape[0], stock_y.shape[1], 1))
 
+        (
+            X_train,
+            X_test,
+            y_train,
+            y_test,
+            X_dates_train,
+            X_dates_test,
+            y_dates_train,
+            y_dates_test,
+            test_data,
+            dates_test,
+            scaler,
+        ) = prepare_scale_train_valid_test(df_stock["5. adjusted close"], ns_parser)
         # Build Neural Network model
         model = build_neural_network_model(
             cfg_nn_models.Long_Short_Term_Memory, ns_parser.n_inputs, ns_parser.n_days
         )
         model.compile(optimizer=ns_parser.s_optimizer, loss=ns_parser.s_loss)
-
-        for idx_loop in range(ns_parser.n_loops):
-            # Train our model
-            model.fit(
-                stock_x,
-                stock_y,
-                epochs=ns_parser.n_epochs,
-                batch_size=ns_parser.n_batch_size,
-                verbose=1,
-            )
-            print("")
-
-            print(model.summary())
-            print("")
-
-            # Prediction
-            yhat = model.predict(
-                stock_train_data[-ns_parser.n_inputs :].reshape(
-                    1, ns_parser.n_inputs, 1
-                ),
-                verbose=0,
-            )
-
-            if idx_loop == 0:
-                # Re-scale the data back, plot, and print the results
-                df_pred = _rescale_data(
-                    df_stock, ns_parser, scaler, yhat, idx_loop
-                ).to_frame()
-            else:
-                df_pred = df_pred.join(
-                    _rescale_data(
-                        df_stock, ns_parser, scaler, yhat, idx_loop
-                    ).to_frame()
-                )
-
-        _plot_and_print_results(
-            df_stock, ns_parser, df_future, df_pred, "LSTM", s_ticker
+        print(X_train.shape, X_test.shape)
+        model.fit(
+            X_train.reshape(X_train.shape[0], X_train.shape[1], 1),
+            y_train,
+            epochs=ns_parser.n_epochs,
+            verbose=True,
+            validation_data=(X_test, y_test),
         )
+
+        preds = model.predict(X_test.reshape(X_test.shape[0], X_test.shape[1], 1))
+
+        plt.scatter(df_stock.index, df_stock["5. adjusted close"].values, s= 3)
+        for i in range(len(y_test)):
+            plt.plot(y_dates_test[i], scaler.inverse_transform(preds[i].reshape(-1,1)), "r", lw=3)
+            plt.fill_between(y_dates_test[i])
+        plt.show()
+        # for idx_loop in range(ns_parser.n_loops):
+        # Train our model
+        #    model.fit(
+        #        stock_x,
+        #        stock_y,
+        #        epochs=ns_parser.n_epochs,
+        #        batch_size=ns_parser.n_batch_size,
+        #        verbose=1,
+        #    )
+        #    print("")
+
+        #    print(model.summary())
+        #    print("")
+
+        #    # Prediction
+        #    yhat = model.predict(
+        #        stock_train_data[-ns_parser.n_inputs :].reshape(
+        #            1, ns_parser.n_inputs, 1
+        #        ),
+        #        verbose=0,
+        #    )
+
+        #    if idx_loop == 0:
+        # Re-scale the data back, plot, and print the results
+        #        df_pred = _rescale_data(
+        #            df_stock, ns_parser, scaler, yhat, idx_loop
+        #        ).to_frame()
+        #    else:
+        #        df_pred = df_pred.join(
+        #            _rescale_data(
+        #                df_stock, ns_parser, scaler, yhat, idx_loop
+        #            ).to_frame()
+        #        )
+
+        # _plot_and_print_results(
+        #    df_stock, ns_parser, df_future, df_pred, "LSTM", s_ticker
+        # )
 
     except Exception as e:
         print(e)

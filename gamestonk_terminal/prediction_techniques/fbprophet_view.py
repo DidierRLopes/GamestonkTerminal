@@ -1,20 +1,23 @@
+""" FB Prophet View"""
+__docformat__ = "numpy"
+
 import argparse
+from typing import List
 import datetime
+import warnings
 import matplotlib.pyplot as plt
 import pandas as pd
 from pandas.plotting import register_matplotlib_converters
-import pmdarima
-from statsmodels.tsa.arima.model import ARIMA
+from fbprophet import Prophet
 from gamestonk_terminal.helper_funcs import (
     check_positive,
+    get_next_stock_market_days,
     parse_known_args_and_warn,
     valid_date,
     patch_pandas_text_adjustment,
-    get_next_stock_market_days,
     plot_autoscale,
 )
 from gamestonk_terminal.prediction_techniques.pred_helper import (
-    print_pretty_prediction,
     price_prediction_backtesting_color,
     print_prediction_kpis,
 )
@@ -24,20 +27,33 @@ from gamestonk_terminal import feature_flags as gtff
 
 register_matplotlib_converters()
 
+warnings.simplefilter("ignore")
 
-def arima(l_args, s_ticker, df_stock):
+
+def fbprophet(other_args: List[str], s_ticker: str, df_stock: pd.DataFrame):
+    """
+    Run FB Prophet model
+    Parameters
+    ----------
+    other_args: List[str]:
+        List of argparse argumenst
+    s_ticker: str
+        Stock ticker
+    df_stock: pd.DataFrame
+        Dataframe of prices
+
+    Returns
+    -------
+
+    """
     parser = argparse.ArgumentParser(
         add_help=False,
-        prog="arima",
+        prog="fbprophet",
         description="""
-            In statistics and econometrics, and in particular in time series analysis, an
-            autoregressive integrated moving average (ARIMA) model is a generalization of an
-            autoregressive moving average (ARMA) model. Both of these models are fitted to time
-            series data either to better understand the data or to predict future points in the
-            series (forecasting). ARIMA(p,d,q) where parameters p, d, and q are non-negative
-            integers, p is the order (number of time lags) of the autoregressive model, d is the
-            degree of differencing (the number of times the data have had past values subtracted),
-            and q is the order of the moving-average model.
+            Facebook Prophet is a forecasting procedure that is fast and provides
+            completely automated forecasts that can be tuned by hand by data scientists
+            and analysts. It was developed by Facebook's data science team and is open
+            source.
         """,
     )
 
@@ -48,41 +64,7 @@ def arima(l_args, s_ticker, df_stock):
         dest="n_days",
         type=check_positive,
         default=5,
-        help="prediction days.",
-    )
-    parser.add_argument(
-        "-i",
-        "--ic",
-        action="store",
-        dest="s_ic",
-        type=str,
-        default="aic",
-        choices=["aic", "aicc", "bic", "hqic", "oob"],
-        help="information criteria.",
-    )
-    parser.add_argument(
-        "-s",
-        "--seasonal",
-        action="store_true",
-        default=False,
-        dest="b_seasonal",
-        help="Use weekly seasonal data.",
-    )
-    parser.add_argument(
-        "-o",
-        "--order",
-        action="store",
-        dest="s_order",
-        type=str,
-        help="arima model order (p,d,q) in format: pdq.",
-    )
-    parser.add_argument(
-        "-r",
-        "--results",
-        action="store_true",
-        dest="b_results",
-        default=False,
-        help="results about ARIMA summary flag.",
+        help="prediction days",
     )
     parser.add_argument(
         "-e",
@@ -95,7 +77,7 @@ def arima(l_args, s_ticker, df_stock):
     )
 
     try:
-        ns_parser = parse_known_args_and_warn(parser, l_args)
+        ns_parser = parse_known_args_and_warn(parser, other_args)
         if not ns_parser:
             return
 
@@ -132,89 +114,60 @@ def arima(l_args, s_ticker, df_stock):
             df_future = df_stock[future_index[0] : future_index[-1]]
             df_stock = df_stock[: ns_parser.s_end_date]
 
-        # Machine Learning model
-        if ns_parser.s_order:
-            t_order = tuple([int(ord) for ord in list(ns_parser.s_order)])
-            model = ARIMA(df_stock["5. adjusted close"].values, order=t_order).fit()
-            l_predictions = model.predict(
-                start=len(df_stock["5. adjusted close"]) + 1,
-                end=len(df_stock["5. adjusted close"]) + ns_parser.n_days,
-            )
-        else:
-            if ns_parser.b_seasonal:
-                model = pmdarima.auto_arima(
-                    df_stock["5. adjusted close"].values,
-                    error_action="ignore",
-                    seasonal=True,
-                    m=5,
-                    information_criteria=ns_parser.s_ic,
-                )
-            else:
-                model = pmdarima.auto_arima(
-                    df_stock["5. adjusted close"].values,
-                    error_action="ignore",
-                    seasonal=False,
-                    information_criteria=ns_parser.s_ic,
-                )
-            l_predictions = model.predict(n_periods=ns_parser.n_days)
+        df_stock = df_stock.sort_index(ascending=True)
+        df_stock.reset_index(level=0, inplace=True)
+        df_stock = df_stock[["date", "5. adjusted close"]]
+        df_stock = df_stock.rename(columns={"date": "ds", "5. adjusted close": "y"})
+        df_stock["ds"] = pd.to_datetime(df_stock["ds"])
 
-        # Prediction data
+        model = Prophet(yearly_seasonality=False, daily_seasonality=False)
+        model.fit(df_stock)
+
         l_pred_days = get_next_stock_market_days(
-            last_stock_day=df_stock["5. adjusted close"].index[-1],
+            last_stock_day=pd.to_datetime(df_stock["ds"].values[-1]),
             n_next_days=ns_parser.n_days,
         )
-        df_pred = pd.Series(l_predictions, index=l_pred_days, name="Price")
+        close_prices = model.make_future_dataframe(periods=ns_parser.n_days)
+        forecast = model.predict(close_prices)
 
-        if ns_parser.b_results:
-            print(model.summary())
-            print("")
+        df_pred = forecast["yhat"][
+            -ns_parser.n_days :
+        ]  # .apply(lambda x: f"{x:.2f} $")
+        df_pred.index = l_pred_days
 
-        # Plotting
-        plt.figure(figsize=plot_autoscale(), dpi=PLOT_DPI)
-        plt.plot(df_stock.index, df_stock["5. adjusted close"], lw=2)
-        if ns_parser.s_order:
-            # BACKTESTING
-            if ns_parser.s_end_date:
-                plt.title(
-                    f"BACKTESTING: ARIMA {str(t_order)} on {s_ticker} - {ns_parser.n_days} days prediction"
-                )
-            else:
-                plt.title(
-                    f"ARIMA {str(t_order)} on {s_ticker} - {ns_parser.n_days} days prediction"
-                )
-        else:
-            # BACKTESTING
-            if ns_parser.s_end_date:
-                plt.title(
-                    f"BACKTESTING: ARIMA {model.order} on {s_ticker} - {ns_parser.n_days} days prediction"
-                )
-            else:
-                plt.title(
-                    f"ARIMA {model.order} on {s_ticker} - {ns_parser.n_days} days prediction"
-                )
-        plt.xlim(
-            df_stock.index[0], get_next_stock_market_days(df_pred.index[-1], 1)[-1]
+        _, ax = plt.subplots(figsize=plot_autoscale(), dpi=PLOT_DPI)
+        model.plot(
+            forecast[: -ns_parser.n_days],
+            ax=ax,
+            xlabel="Time",
+            ylabel="Share Price ($)",
         )
-        plt.xlabel("Time")
-        plt.ylabel("Share Price ($)")
-        plt.grid(b=True, which="major", color="#666666", linestyle="-")
-        plt.minorticks_on()
-        plt.grid(b=True, which="minor", color="#999999", linestyle="-", alpha=0.2)
-        plt.plot(
-            [df_stock.index[-1], df_pred.index[0]],
-            [df_stock["5. adjusted close"].values[-1], df_pred.values[0]],
-            lw=1,
-            c="tab:green",
+        _, _, ymin, ymax = ax.axis()
+        ax.vlines(
+            df_stock["ds"].values[-1],
+            ymin,
+            ymax,
+            linewidth=2,
             linestyle="--",
+            color="k",
         )
-        plt.plot(df_pred.index, df_pred, lw=2, c="tab:green")
         plt.axvspan(
-            df_stock.index[-1], df_pred.index[-1], facecolor="tab:orange", alpha=0.2
+            df_stock["ds"].values[-1],
+            l_pred_days[-1],
+            facecolor="tab:orange",
+            alpha=0.2,
         )
-        _, _, ymin, ymax = plt.axis()
-        plt.vlines(
-            df_stock.index[-1], ymin, ymax, linewidth=1, linestyle="--", color="k"
+        plt.ylim(ymin, ymax)
+        plt.xlim(
+            df_stock["ds"].values[0], get_next_stock_market_days(l_pred_days[-1], 1)[-1]
         )
+        # BACKTESTING
+        if ns_parser.s_end_date:
+            plt.title(
+                f"BACKTESTING: Fb Prophet on {s_ticker} - {ns_parser.n_days} days prediction"
+            )
+        else:
+            plt.title(f"Fb Prophet on {s_ticker} - {ns_parser.n_days} days prediction")
 
         # BACKTESTING
         if ns_parser.s_end_date:
@@ -226,15 +179,17 @@ def arima(l_args, s_ticker, df_stock):
                 ls="--",
             )
             plt.plot(
-                [df_stock.index[-1], df_future.index[0]],
+                [df_stock["ds"].values[-1], df_future.index[0]],
                 [
-                    df_stock["5. adjusted close"].values[-1],
+                    df_stock["y"].values[-1],
                     df_future["5. adjusted close"].values[0],
                 ],
                 lw=1,
                 c="tab:blue",
                 linestyle="--",
             )
+
+        plt.plot(df_pred.index, df_pred.values, lw=2, c="green")
 
         if gtff.USE_ION:
             plt.ion()
@@ -254,12 +209,15 @@ def arima(l_args, s_ticker, df_stock):
             )
             plt.plot(df_pred.index, df_pred, lw=2, c="green")
             plt.scatter(
-                df_future.index, df_future["5. adjusted close"], c="tab:blue", lw=3
+                df_future.index,
+                df_future["5. adjusted close"],
+                c="tab:blue",
+                lw=3,
             )
             plt.plot(
-                [df_stock.index[-1], df_future.index[0]],
+                [df_stock["ds"].values[-1], df_future.index[0]],
                 [
-                    df_stock["5. adjusted close"].values[-1],
+                    df_stock["y"].values[-1],
                     df_future["5. adjusted close"].values[0],
                 ],
                 lw=2,
@@ -268,17 +226,16 @@ def arima(l_args, s_ticker, df_stock):
             )
             plt.scatter(df_pred.index, df_pred, c="green", lw=3)
             plt.plot(
-                [df_stock.index[-1], df_pred.index[0]],
-                [df_stock["5. adjusted close"].values[-1], df_pred.values[0]],
+                [df_stock["ds"].values[-1], df_pred.index[0]],
+                [df_stock["y"].values[-1], df_pred.values[0]],
                 lw=2,
                 c="green",
                 ls="--",
             )
             plt.title("BACKTESTING: Real data price versus Prediction")
-            plt.xlim(df_stock.index[-1], df_pred.index[-1] + datetime.timedelta(days=1))
-            plt.xticks(
-                [df_stock.index[-1], df_pred.index[-1] + datetime.timedelta(days=1)],
-                visible=True,
+            plt.xlim(
+                df_stock["ds"].values[-1],
+                df_pred.index[-1] + datetime.timedelta(days=1),
             )
             plt.ylabel("Share Price ($)")
             plt.grid(b=True, which="major", color="#666666", linestyle="-")
@@ -289,6 +246,7 @@ def arima(l_args, s_ticker, df_stock):
 
             plt.subplot(212)
             plt.axhline(y=0, color="k", linestyle="--", linewidth=2)
+
             plt.plot(
                 df_future.index,
                 100
@@ -307,7 +265,7 @@ def arima(l_args, s_ticker, df_stock):
             )
             plt.title("BACKTESTING: Error between Real data and Prediction [%]")
             plt.plot(
-                [df_stock.index[-1], df_future.index[0]],
+                [df_stock["ds"].values[-1], df_future.index[0]],
                 [
                     0,
                     100
@@ -318,10 +276,9 @@ def arima(l_args, s_ticker, df_stock):
                 ls="--",
                 c="red",
             )
-            plt.xlim(df_stock.index[-1], df_pred.index[-1] + datetime.timedelta(days=1))
-            plt.xticks(
-                [df_stock.index[-1], df_pred.index[-1] + datetime.timedelta(days=1)],
-                visible=True,
+            plt.xlim(
+                df_stock["ds"].values[-1],
+                df_pred.index[-1] + datetime.timedelta(days=1),
             )
             plt.xlabel("Time")
             plt.ylabel("Prediction Error (%)")
@@ -355,10 +312,10 @@ def arima(l_args, s_ticker, df_stock):
 
             print("")
             print_prediction_kpis(df_pred["Real"].values, df_pred["Prediction"].values)
-
         else:
-            # Print prediction data
-            print_pretty_prediction(df_pred, df_stock["5. adjusted close"].values[-1])
+            print("")
+            print("Predicted share price:")
+            print(df_pred.to_string())
         print("")
 
     except Exception as e:

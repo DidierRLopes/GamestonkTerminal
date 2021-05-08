@@ -1,10 +1,14 @@
+""" ARIMA Model View """
+__docformat__ = "numpy"
+
 import argparse
+from typing import List
 import datetime
-import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from pandas.plotting import register_matplotlib_converters
-
+import pmdarima
+from statsmodels.tsa.arima.model import ARIMA
 from gamestonk_terminal.helper_funcs import (
     check_positive,
     parse_known_args_and_warn,
@@ -13,7 +17,6 @@ from gamestonk_terminal.helper_funcs import (
     get_next_stock_market_days,
     plot_autoscale,
 )
-
 from gamestonk_terminal.prediction_techniques.pred_helper import (
     print_pretty_prediction,
     price_prediction_backtesting_color,
@@ -26,31 +29,37 @@ from gamestonk_terminal import feature_flags as gtff
 register_matplotlib_converters()
 
 
-# pylint: disable=unused-argument
-def simple_moving_average(l_args, s_ticker, df_stock):
+def arima(other_args: List[str], s_ticker: str, df_stock: pd.DataFrame):
+    """
+    ARIMA prediction
+    Parameters
+    ----------
+    other_args: List[str]
+        Argparse arguments
+    s_ticker: str
+        ticker
+    df_stock: pd.DataFrame
+        Dataframe of prices
+
+    Returns
+    -------
+
+    """
     parser = argparse.ArgumentParser(
         add_help=False,
-        prog="sma",
+        prog="arima",
         description="""
-            Moving Averages are used to smooth the data in an array to
-            help eliminate noise and identify trends. The Simple Moving Average is literally
-            the simplest form of a moving average. Each output value is the average of the
-            previous n values. In a Simple Moving Average, each value in the time period carries
-            equal weight, and values outside of the time period are not included in the average.
-            This makes it less responsive to recent changes in the data, which can be useful for
-            filtering out those changes.
+            In statistics and econometrics, and in particular in time series analysis, an
+            autoregressive integrated moving average (ARIMA) model is a generalization of an
+            autoregressive moving average (ARMA) model. Both of these models are fitted to time
+            series data either to better understand the data or to predict future points in the
+            series (forecasting). ARIMA(p,d,q) where parameters p, d, and q are non-negative
+            integers, p is the order (number of time lags) of the autoregressive model, d is the
+            degree of differencing (the number of times the data have had past values subtracted),
+            and q is the order of the moving-average model.
         """,
     )
 
-    parser.add_argument(
-        "-l",
-        "--length",
-        action="store",
-        dest="n_length",
-        type=check_positive,
-        default=20,
-        help="length of SMA window.",
-    )
     parser.add_argument(
         "-d",
         "--days",
@@ -59,6 +68,40 @@ def simple_moving_average(l_args, s_ticker, df_stock):
         type=check_positive,
         default=5,
         help="prediction days.",
+    )
+    parser.add_argument(
+        "-i",
+        "--ic",
+        action="store",
+        dest="s_ic",
+        type=str,
+        default="aic",
+        choices=["aic", "aicc", "bic", "hqic", "oob"],
+        help="information criteria.",
+    )
+    parser.add_argument(
+        "-s",
+        "--seasonal",
+        action="store_true",
+        default=False,
+        dest="b_seasonal",
+        help="Use weekly seasonal data.",
+    )
+    parser.add_argument(
+        "-o",
+        "--order",
+        action="store",
+        dest="s_order",
+        type=str,
+        help="arima model order (p,d,q) in format: p,d,q.",
+    )
+    parser.add_argument(
+        "-r",
+        "--results",
+        action="store_true",
+        dest="b_results",
+        default=False,
+        help="results about ARIMA summary flag.",
     )
     parser.add_argument(
         "-e",
@@ -71,7 +114,7 @@ def simple_moving_average(l_args, s_ticker, df_stock):
     )
 
     try:
-        ns_parser = parse_known_args_and_warn(parser, l_args)
+        ns_parser = parse_known_args_and_warn(parser, other_args)
         if not ns_parser:
             return
 
@@ -108,35 +151,66 @@ def simple_moving_average(l_args, s_ticker, df_stock):
             df_future = df_stock[future_index[0] : future_index[-1]]
             df_stock = df_stock[: ns_parser.s_end_date]
 
-        # Prediction data
-        l_predictions = list()
-        for pred_day in range(ns_parser.n_days):
-            if pred_day < ns_parser.n_length:
-                l_ma_stock = df_stock["5. adjusted close"].values[
-                    -ns_parser.n_length + pred_day :
-                ]
+        # Machine Learning model
+        if ns_parser.s_order:
+            t_order = tuple([int(ord) for ord in ns_parser.s_order.split(",")])
+            model = ARIMA(df_stock["5. adjusted close"].values, order=t_order).fit()
+            l_predictions = model.predict(
+                start=len(df_stock["5. adjusted close"]) + 1,
+                end=len(df_stock["5. adjusted close"]) + ns_parser.n_days,
+            )
+        else:
+            if ns_parser.b_seasonal:
+                model = pmdarima.auto_arima(
+                    df_stock["5. adjusted close"].values,
+                    error_action="ignore",
+                    seasonal=True,
+                    m=5,
+                    information_criteria=ns_parser.s_ic,
+                )
             else:
-                l_ma_stock = list()
-            l_predictions.append(np.mean(np.append(l_ma_stock, l_predictions)))
+                model = pmdarima.auto_arima(
+                    df_stock["5. adjusted close"].values,
+                    error_action="ignore",
+                    seasonal=False,
+                    information_criteria=ns_parser.s_ic,
+                )
+            l_predictions = model.predict(n_periods=ns_parser.n_days)
 
+        # Prediction data
         l_pred_days = get_next_stock_market_days(
             last_stock_day=df_stock["5. adjusted close"].index[-1],
             n_next_days=ns_parser.n_days,
         )
         df_pred = pd.Series(l_predictions, index=l_pred_days, name="Price")
 
+        if ns_parser.b_results:
+            print(model.summary())
+            print("")
+
         # Plotting
         plt.figure(figsize=plot_autoscale(), dpi=PLOT_DPI)
         plt.plot(df_stock.index, df_stock["5. adjusted close"], lw=2)
-        # BACKTESTING
-        if ns_parser.s_end_date:
-            plt.title(
-                f"BACKTESTING: {ns_parser.n_length} Moving Average on {s_ticker} - {ns_parser.n_days} days prediction"
-            )
+        if ns_parser.s_order:
+            # BACKTESTING
+            if ns_parser.s_end_date:
+                plt.title(
+                    f"BACKTESTING: ARIMA {str(t_order)} on {s_ticker} - {ns_parser.n_days} days prediction"
+                )
+            else:
+                plt.title(
+                    f"ARIMA {str(t_order)} on {s_ticker} - {ns_parser.n_days} days prediction"
+                )
         else:
-            plt.title(
-                f"{ns_parser.n_length} Moving Average on {s_ticker} - {ns_parser.n_days} days prediction"
-            )
+            # BACKTESTING
+            if ns_parser.s_end_date:
+                plt.title(
+                    f"BACKTESTING: ARIMA {model.order} on {s_ticker} - {ns_parser.n_days} days prediction"
+                )
+            else:
+                plt.title(
+                    f"ARIMA {model.order} on {s_ticker} - {ns_parser.n_days} days prediction"
+                )
         plt.xlim(
             df_stock.index[0], get_next_stock_market_days(df_pred.index[-1], 1)[-1]
         )
@@ -145,8 +219,6 @@ def simple_moving_average(l_args, s_ticker, df_stock):
         plt.grid(b=True, which="major", color="#666666", linestyle="-")
         plt.minorticks_on()
         plt.grid(b=True, which="minor", color="#999999", linestyle="-", alpha=0.2)
-        df_ma = df_stock["5. adjusted close"].rolling(window=ns_parser.n_length).mean()
-        plt.plot(df_ma.index, df_ma, lw=2, linestyle="--", c="tab:orange")
         plt.plot(
             [df_stock.index[-1], df_pred.index[0]],
             [df_stock["5. adjusted close"].values[-1], df_pred.values[0]],
@@ -309,5 +381,4 @@ def simple_moving_average(l_args, s_ticker, df_stock):
         print("")
 
     except Exception as e:
-        print(e)
-        print("")
+        print(e, "\n")

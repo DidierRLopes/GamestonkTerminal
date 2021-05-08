@@ -1,4 +1,8 @@
+""" K Nearest Neighbors View"""
+__docformat__ = "numpy"
+
 import argparse
+from typing import List
 import datetime
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -17,6 +21,7 @@ from gamestonk_terminal.prediction_techniques.pred_helper import (
     print_pretty_prediction,
     price_prediction_backtesting_color,
     print_prediction_kpis,
+    get_backtesting_data,
 )
 
 from gamestonk_terminal.config_plot import PLOT_DPI
@@ -25,7 +30,22 @@ from gamestonk_terminal import feature_flags as gtff
 register_matplotlib_converters()
 
 
-def k_nearest_neighbors(l_args, s_ticker, df_stock):
+def k_nearest_neighbors(other_args: List[str], s_ticker: str, df_stock: pd.DataFrame):
+    """
+    Train KNN model
+    Parameters
+    ----------
+    other_args: List[str]
+        List of argparse arguments
+    s_ticker: str
+        Ticker
+    df_stock: pd.DataFrame
+        Dataframe of stock prices
+
+    Returns
+    -------
+
+    """
     parser = argparse.ArgumentParser(
         add_help=False,
         prog="knn",
@@ -43,7 +63,7 @@ def k_nearest_neighbors(l_args, s_ticker, df_stock):
         dest="n_inputs",
         type=check_positive,
         default=40,
-        help="number of days to use for prediction.",
+        help="number of days to use as input for prediction.",
     )
     parser.add_argument(
         "-d",
@@ -79,43 +99,30 @@ def k_nearest_neighbors(l_args, s_ticker, df_stock):
         type=valid_date,
         dest="s_end_date",
         default=None,
-        help="The end date (format YYYY-MM-DD) to select - Backtesting",
+        help="The end date (format YYYY-MM-DD) to select for testing",
+    )
+
+    parser.add_argument(
+        "-t",
+        "--test_size",
+        default=0.2,
+        dest="test_size",
+        type=float,
+        help="Percentage of data to validate in sample",
     )
 
     try:
-        ns_parser = parse_known_args_and_warn(parser, l_args)
+        ns_parser = parse_known_args_and_warn(parser, other_args)
         if not ns_parser:
             return
 
         # BACKTESTING
         if ns_parser.s_end_date:
-            if ns_parser.s_end_date < df_stock.index[0]:
-                print(
-                    "Backtesting not allowed, since End Date is older than Start Date of historical data\n"
-                )
-                return
-
-            if ns_parser.s_end_date < get_next_stock_market_days(
-                last_stock_day=df_stock.index[0],
-                n_next_days=ns_parser.n_inputs + ns_parser.n_days,
-            )[-1]:
-                print(
-                    "Backtesting not allowed, since End Date is too close to Start Date to train model\n"
-                )
-                return
-
-            future_index = get_next_stock_market_days(
-                last_stock_day=ns_parser.s_end_date, n_next_days=ns_parser.n_days
+            df_future, df_stock, bt_flag = get_backtesting_data(
+                df_stock, ns_parser.s_end_date, ns_parser.n_days
             )
-
-            if future_index[-1] > datetime.datetime.now():
-                print(
-                    "Backtesting not allowed, since End Date + Prediction days is in the future\n"
-                )
+            if not bt_flag:
                 return
-
-            df_future = df_stock[future_index[0] : future_index[-1]]
-            df_stock = df_stock[: ns_parser.s_end_date]
 
         # Split training data
         stock_x, stock_y = splitTrain.split_train(

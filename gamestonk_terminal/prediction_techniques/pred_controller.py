@@ -1,3 +1,6 @@
+""" Due Diligence Controller """
+__docformat__ = "numpy"
+
 import argparse
 from typing import List
 from datetime import datetime
@@ -9,12 +12,12 @@ from gamestonk_terminal import feature_flags as gtff
 from gamestonk_terminal.helper_funcs import get_flair
 from gamestonk_terminal.menu import session
 from gamestonk_terminal.prediction_techniques import (
-    arima,
-    ets,
-    knn,
-    neural_networks,
-    regression,
-    sma,
+    arima_view,
+    ets_view,
+    knn_view,
+    neural_networks_view,
+    regression_view,
+    sma_view,
 )
 
 
@@ -122,58 +125,64 @@ class PredictionTechniquesController:
 
     def call_sma(self, other_args: List[str]):
         """Process sma command"""
-        sma.simple_moving_average(other_args, self.ticker, self.stock)
+        sma_view.simple_moving_average(other_args, self.ticker, self.stock)
 
     def call_ets(self, other_args: List[str]):
         """Process ets command"""
-        ets.exponential_smoothing(other_args, self.ticker, self.stock)
+        ets_view.exponential_smoothing(other_args, self.ticker, self.stock)
 
     def call_knn(self, other_args: List[str]):
         """Process knn command"""
-        knn.k_nearest_neighbors(other_args, self.ticker, self.stock)
+        knn_view.k_nearest_neighbors(other_args, self.ticker, self.stock)
 
     def call_linear(self, other_args: List[str]):
         """Process linear command"""
-        regression.regression(other_args, self.ticker, self.stock, regression.LINEAR)
+        regression_view.regression(
+            other_args, self.ticker, self.stock, regression_view.LINEAR
+        )
 
     def call_quadratic(self, other_args: List[str]):
         """Process quadratic command"""
-        regression.regression(other_args, self.ticker, self.stock, regression.QUADRATIC)
+        regression_view.regression(
+            other_args, self.ticker, self.stock, regression_view.QUADRATIC
+        )
 
     def call_cubic(self, other_args: List[str]):
         """Process cubic command"""
-        regression.regression(other_args, self.ticker, self.stock, regression.CUBIC)
+        regression_view.regression(
+            other_args, self.ticker, self.stock, regression_view.CUBIC
+        )
 
     def call_regression(self, other_args: List[str]):
         """Process regression command"""
-        regression.regression(
-            other_args, self.ticker, self.stock, regression.USER_INPUT
+        regression_view.regression(
+            other_args, self.ticker, self.stock, regression_view.USER_INPUT
         )
 
     def call_arima(self, other_args: List[str]):
         """Process arima command"""
-        arima.arima(other_args, self.ticker, self.stock)
+        arima_view.arima(other_args, self.ticker, self.stock)
 
     def call_mlp(self, other_args: List[str]):
         """Process mlp command"""
-        neural_networks.mlp(other_args, self.ticker, self.stock)
+        neural_networks_view.mlp(other_args, self.ticker, self.stock)
 
     def call_rnn(self, other_args: List[str]):
         """Process rnn command"""
-        neural_networks.rnn(other_args, self.ticker, self.stock)
+        neural_networks_view.rnn(other_args, self.ticker, self.stock)
 
     def call_lstm(self, other_args: List[str]):
         """Process lstm command"""
-        neural_networks.lstm(other_args, self.ticker, self.stock)
+        neural_networks_view.lstm(other_args, self.ticker, self.stock)
 
     if gtff.ENABLE_FBPROPHET:
 
         def call_prophet(self, other_args: List[str]):
             """Process prophet command"""
             # pylint: disable=import-outside-toplevel
-            from gamestonk_terminal.prediction_techniques import fbprophet
+            from gamestonk_terminal.prediction_techniques import fbprophet_view
 
-            fbprophet.fbprophet(other_args, self.ticker, self.stock)
+            fbprophet_view.fbprophet(other_args, self.ticker, self.stock)
 
 
 def menu(stock: pd.DataFrame, ticker: str, start: datetime, interval: str):
